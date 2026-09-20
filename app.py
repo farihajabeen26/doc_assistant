@@ -34,7 +34,7 @@ CHUNK_SIZE = 800        # characters per chunk
 CHUNK_OVERLAP = 150     # overlap between consecutive chunks
 TOP_K = 5               # how many chunks to retrieve per question
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # The Groq key comes ONLY from Streamlit secrets, never hardcoded (step 12).
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
@@ -64,11 +64,64 @@ def extract_pdf(file_bytes, filename):
     from pypdf import PdfReader
     reader = PdfReader(file_bytes)
     pages = []
+    ocr_needed_page_nums = []
+
     for i, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
         if text.strip():
             pages.append((i, text))
+        else:
+            # No text layer on this page (common for scans, CAD/drawing
+            # exports, or image-only PDFs) — flag it for OCR below.
+            ocr_needed_page_nums.append(i)
+
+    if ocr_needed_page_nums:
+        ocr_pages = ocr_pdf_pages(file_bytes, ocr_needed_page_nums)
+        pages.extend(ocr_pages)
+
+    pages.sort(key=lambda p: p[0])
     return pages
+
+
+def ocr_pdf_pages(file_bytes, page_numbers):
+    """Rasterize specific PDF pages and run OCR on them. Requires the
+    tesseract-ocr and poppler system packages to be installed (see README)."""
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+    except ImportError:
+        st.warning(
+            "Some pages have no text layer and would need OCR (pytesseract/pdf2image), "
+            "but those packages aren't installed. Install them to extract text from "
+            "scanned or image-only PDF pages."
+        )
+        return []
+
+    file_bytes.seek(0)
+    raw_bytes = file_bytes.read()
+    file_bytes.seek(0)
+
+    results = []
+    try:
+        images = convert_from_bytes(
+            raw_bytes,
+            dpi=200,
+            first_page=min(page_numbers),
+            last_page=max(page_numbers),
+        )
+    except Exception as e:
+        st.warning(f"OCR fallback failed to render PDF pages: {e}")
+        return []
+
+    start = min(page_numbers)
+    for offset, image in enumerate(images):
+        page_num = start + offset
+        if page_num not in page_numbers:
+            continue
+        text = pytesseract.image_to_string(image)
+        if text.strip():
+            results.append((page_num, text))
+    return results
 
 
 def extract_docx(file_bytes, filename):
@@ -506,5 +559,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-    
+
+
 
