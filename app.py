@@ -34,7 +34,7 @@ CHUNK_SIZE = 800        # characters per chunk
 CHUNK_OVERLAP = 150     # overlap between consecutive chunks
 TOP_K = 5               # how many chunks to retrieve per question
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 # The Groq key comes ONLY from Streamlit secrets, never hardcoded (step 12).
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
