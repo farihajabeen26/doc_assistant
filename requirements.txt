@@ -6,3 +6,5 @@ faiss-cpu
 groq
 gdown
 numpy
+pytesseract
+pdf2image
