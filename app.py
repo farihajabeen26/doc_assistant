@@ -261,6 +261,21 @@ def ask_groq(question, retrieved_chunks):
 # 8. GOOGLE DRIVE LOADING
 # ----------------------------------------------------------------------------
 
+def extract_drive_file_id(link):
+    """Pull the file ID out of any common Google Drive share-link format,
+    e.g. .../file/d/<ID>/view, .../open?id=<ID>, or a bare ID."""
+    patterns = [
+        r"/file/d/([a-zA-Z0-9_-]+)",
+        r"[?&]id=([a-zA-Z0-9_-]+)",
+        r"^([a-zA-Z0-9_-]{20,})$",  # bare ID, just in case
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, link)
+        if match:
+            return match.group(1)
+    return None
+
+
 def load_files_from_drive(drive_link):
     """Download a public Google Drive file or folder link into temp files
     and return a list of (filename, BytesIO) tuples for supported types."""
@@ -275,7 +290,11 @@ def load_files_from_drive(drive_link):
             downloaded_paths = gdown.download_folder(url=drive_link, output=tmp_dir, quiet=True)
             downloaded_paths = downloaded_paths or []
         else:
-            out_path = gdown.download(url=drive_link, output=tmp_dir + os.sep, quiet=True, fuzzy=True)
+            file_id = extract_drive_file_id(drive_link)
+            if not file_id:
+                st.error("Could not find a file ID in that Google Drive link.")
+                return []
+            out_path = gdown.download(id=file_id, output=tmp_dir + os.sep, quiet=True)
             if out_path:
                 downloaded_paths = [out_path]
     except Exception as e:
@@ -407,3 +426,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
