@@ -34,7 +34,7 @@ CHUNK_SIZE = 800        # characters per chunk
 CHUNK_OVERLAP = 150     # overlap between consecutive chunks
 TOP_K = 5               # how many chunks to retrieve per question
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # The Groq key comes ONLY from Streamlit secrets, never hardcoded (step 12).
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
@@ -276,6 +276,37 @@ def extract_drive_file_id(link):
     return None
 
 
+def guess_extension_from_content(path):
+    """Detect the real file type by looking at its bytes, not its name.
+    Needed because downloading a single Drive file by ID doesn't always
+    preserve a recognizable filename/extension."""
+    import zipfile
+
+    with open(path, "rb") as f:
+        head = f.read(8)
+
+    if head.startswith(b"%PDF"):
+        return ".pdf"
+
+    if head[:2] == b"PK":  # zip-based format (docx, xlsx, pptx, or a plain zip)
+        try:
+            with zipfile.ZipFile(path) as z:
+                if "word/document.xml" in z.namelist():
+                    return ".docx"
+        except zipfile.BadZipFile:
+            pass
+        return None  # a zip, but not a Word doc we can extract
+
+    # Otherwise, try treating it as plain text (covers .txt and .md alike,
+    # since both are extracted identically in this app).
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            f.read(1024)
+        return ".txt"
+    except UnicodeDecodeError:
+        return None
+
+
 def load_files_from_drive(drive_link):
     """Download a public Google Drive file or folder link into temp files
     and return a list of (filename, BytesIO) tuples for supported types."""
@@ -301,12 +332,31 @@ def load_files_from_drive(drive_link):
         st.error(f"Could not load from Google Drive: {e}")
         return []
 
+    if not downloaded_paths:
+        st.warning("Google Drive returned no files for that link. Double-check it's shared as 'Anyone with the link'.")
+        return []
+
     results = []
+    skipped = []
     for path in downloaded_paths:
-        ext = os.path.splitext(path)[1].lower()
-        if ext in EXTRACTORS:
-            with open(path, "rb") as f:
-                results.append((os.path.basename(path), BytesIO(f.read())))
+        filename = os.path.basename(path)
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext not in EXTRACTORS:
+            # Filename didn't carry a usable extension — sniff the actual content.
+            detected_ext = guess_extension_from_content(path)
+            if detected_ext is None:
+                skipped.append(filename)
+                continue
+            ext = detected_ext
+            filename = filename + ext  # give it a usable name for downstream extraction
+
+        with open(path, "rb") as f:
+            results.append((filename, BytesIO(f.read())))
+
+    if skipped:
+        st.warning(f"Skipped unsupported file(s): {', '.join(skipped)}")
+
     return results
 
 
@@ -316,10 +366,11 @@ def load_files_from_drive(drive_link):
 
 def init_session_state():
     defaults = {
-        "chunks": [],            # all chunk records (with metadata) across all docs
-        "embeddings": None,      # numpy array aligned with chunks
+        "chunks": [],                  # all chunk records (with metadata) across all docs
+        "embeddings": None,            # numpy array aligned with chunks
         "faiss_index": None,
-        "processed_files": set(),  # filenames already embedded, to avoid recompute (step 11)
+        "processed_files": set(),      # content hashes already embedded, to avoid recompute (step 11)
+        "processed_filenames": set(),  # display-only: filenames currently loaded
         "chat_history": [],
     }
     for key, value in defaults.items():
@@ -327,16 +378,37 @@ def init_session_state():
             st.session_state[key] = value
 
 
+def clear_all_documents():
+    st.session_state.chunks = []
+    st.session_state.embeddings = None
+    st.session_state.faiss_index = None
+    st.session_state.processed_files = set()
+    st.session_state.processed_filenames = set()
+
+
 def process_new_files(files_with_bytes):
-    """Extract, chunk, and embed only files we haven't processed yet."""
+    """Extract, chunk, and embed only files we haven't processed yet.
+    We key on a hash of the file's content (not just its filename) so two
+    different files that happen to share a name aren't confused for each other."""
+    import hashlib
+
     new_chunks = []
     for filename, file_bytes in files_with_bytes:
-        if filename in st.session_state.processed_files:
+        content = file_bytes.read()
+        file_bytes.seek(0)
+        file_hash = hashlib.sha256(content).hexdigest()
+
+        if file_hash in st.session_state.processed_files:
             continue
-        pages = extract_document(file_bytes, filename)
-        chunks = build_chunks_for_document(pages, filename)
+        try:
+            pages = extract_document(file_bytes, filename)
+            chunks = build_chunks_for_document(pages, filename)
+        except Exception as e:
+            st.sidebar.error(f"Could not process {filename}: {e}")
+            continue
         new_chunks.extend(chunks)
-        st.session_state.processed_files.add(filename)
+        st.session_state.processed_files.add(file_hash)
+        st.session_state.processed_filenames.add(filename)
 
     if not new_chunks:
         return 0
@@ -373,8 +445,15 @@ def main():
         load_drive_clicked = st.button("Load from Drive")
 
         st.divider()
-        st.write(f"📚 Documents processed: **{len(st.session_state.processed_files)}**")
+        st.write(f"📚 Documents processed: **{len(st.session_state.processed_filenames)}**")
         st.write(f"🧩 Total chunks: **{len(st.session_state.chunks)}**")
+        if st.session_state.processed_filenames:
+            with st.expander("Loaded files"):
+                for name in sorted(st.session_state.processed_filenames):
+                    st.write(f"• {name}")
+            if st.button("🗑️ Clear all documents"):
+                clear_all_documents()
+                st.rerun()
 
     # --- Handle local uploads ---
     if uploaded:
@@ -426,4 +505,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    
 
